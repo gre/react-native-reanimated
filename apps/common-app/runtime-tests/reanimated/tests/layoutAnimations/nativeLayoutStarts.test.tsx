@@ -286,19 +286,13 @@ describe('native layout starts after the mount of the final state', () => {
       { transform: endTransformOf([TURN]) },
     ],
     [
-      'operations with two durations',
+      'an operation with no duration after a delay beside an operation with a duration',
       {},
-      'UnsupportedTiming',
+      'UnsupportedTrackForm',
       ...transformCase([
         TURN,
-        ['translateX', 0, 10, { duration: 2 * DURATION }],
+        ['translateX', 0, 10, { duration: 0, delays: [50] }],
       ]),
-    ],
-    [
-      'an operation with a delay of its own',
-      {},
-      'UnsupportedTiming',
-      ...transformCase([TURN, ['translateX', 0, 10, { delays: [50] }]]),
     ],
     [
       'an operation with a spring',
@@ -338,6 +332,15 @@ describe('native layout starts after the mount of the final state', () => {
         ],
         [{ rotateX: '0deg' }]
       ),
+    ],
+    [
+      'more segments than the native route takes in the longest operation timeline and two scalar leaves',
+      {
+        originX: { easing: Easing.bounce },
+        opacity: { easing: Easing.bounce, initial: 0.5, to: 1 },
+      },
+      'ResourceLimit',
+      ...transformCase([['rotate', 0, 1, { easing: Easing.bounce }]]),
     ],
     [
       'more operations than the limit',
@@ -538,6 +541,24 @@ describe('native layout starts after the mount of the final state', () => {
         ['translateX', 0, 10, { isPlain: true }],
         ['scale', 1, 1.2],
       ]),
+    ],
+    [
+      'four operations with the 22 segments of Easing.bounce beside a position leaf with them',
+      { originX: { easing: Easing.bounce } },
+      ['PositionX', 'Transform'],
+      ...transformCase([
+        ['translateX', 0, 10, { easing: Easing.bounce }],
+        ['translateY', 0, 10, { easing: Easing.bounce }],
+        ['scale', 1, 1.2, { easing: Easing.bounce }],
+        ['rotate', 0, 1, { easing: Easing.bounce }],
+      ]),
+    ],
+    [
+      'a transform leaf with no operation beside a position leaf',
+      { originX: {} },
+      ['PositionX', 'Transform'],
+      { transform: { operations: [] } },
+      {},
     ],
     [
       'the largest number of leaves',
