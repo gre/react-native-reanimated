@@ -1,0 +1,1 @@
+Fix the edges of a view that a native layout animation rotates on iOS: the layer has edge antialiasing for the time of a native `transform` track with a rotation about the Z axis, as it has with the frame-driven animation.

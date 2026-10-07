@@ -322,6 +322,32 @@ id currentVisualValue(CALayer *layer, NSString *keyPath)
   return [[layer presentationLayer] valueForKeyPath:keyPath] ?: [layer valueForKeyPath:keyPath];
 }
 
+/// The value that React Native gives `allowsEdgeAntialiasing` with the transform of a view: the `transform`
+/// block of `updateProps:oldProps:` in `RCTViewComponentView.mm`.
+bool hasEdgeAntialiasingInReactNative(const CATransform3D &transform)
+{
+  return transform.m12 != 0 || transform.m21 != 0 || transform.m34 != 0;
+}
+
+bool rotatesAboutZ(const AnimationValue &value)
+{
+  const auto *transform = std::get_if<AnimationTransform>(&value);
+  return transform != nullptr &&
+      std::ranges::any_of(transform->operations, [](const AnimationTransformOperation &operation) {
+           return operation.kind == TransformOperationKind::RotateZ && operation.value != 0;
+         });
+}
+
+/// True when a key of the track rotates the layer about the Z axis. The frame driver writes such a transform
+/// to the model, and React Native gives it edge antialiasing.
+bool rotatesAboutZ(const AnimationTrack &track)
+{
+  const auto *start = std::get_if<AnimationValue>(&track.start);
+  return (start != nullptr && rotatesAboutZ(*start)) ||
+      std::ranges::any_of(
+             track.segments, [](const AnimationSegment &segment) { return rotatesAboutZ(segment.endValue); });
+}
+
 #ifndef NDEBUG
 std::vector<double> componentsOfValue(id value)
 {
@@ -599,8 +625,6 @@ class CoreAnimationPlatform final : public NativeAnimationPlatform,
       return;
     }
     CALayer *layer = trackIt->second;
-    tracks_.erase(trackIt);
-
     NSString *keyPath = keyPathForTarget(track.target);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -608,6 +632,7 @@ class CoreAnimationPlatform final : public NativeAnimationPlatform,
     if (mode == TrackStopMode::KeepVisibleValue && mountedLayer(track.handle.tag) == layer) {
       [layer setValue:currentVisualValue(layer, keyPath) forKeyPath:keyPath];
     }
+    release(trackIt);
     [layer removeAnimationForKey:animationKeyForTrack(track)];
     [CATransaction commit];
   }
@@ -640,13 +665,17 @@ class CoreAnimationPlatform final : public NativeAnimationPlatform,
     if (trackIt == tracks_.end()) {
       return;
     }
-    CALayer *layer = trackIt->second;
-    tracks_.erase(trackIt);
+    CALayer *layer = release(trackIt);
     [layer removeAnimationForKey:animationKeyForTrack(track)];
   }
 
   // A block captures a C++ reference as a reference, so the key comes by value.
-  void play(const TrackKey track, CALayer *layer, CAAnimation *animation, const bool holdsEndValue)
+  void play(
+      const TrackKey track,
+      CALayer *layer,
+      CAAnimation *animation,
+      const bool holdsEndValue,
+      const bool needsEdgeAntialiasing)
   {
     const auto weakThis = weak_from_this();
     animation.delegate = [[REANativeAnimationDelegate alloc] initWithStopHandler:^(BOOL finished) {
@@ -655,10 +684,29 @@ class CoreAnimationPlatform final : public NativeAnimationPlatform,
       }
     }];
     tracks_.emplace(track, layer);
+    if (needsEdgeAntialiasing) {
+      layer.allowsEdgeAntialiasing = YES;
+    }
     [layer addAnimation:animation forKey:animationKeyForTrack(track)];
   }
 
  private:
+  using Tracks = std::unordered_map<TrackKey, __strong CALayer *, TrackKeyHash>;
+
+  /// Takes a track from its layer. A `Transform` track can rotate a layer whose model transform has no
+  /// rotation, so `play` gives the layer edge antialiasing for the time of such a track. After that time,
+  /// the layer has the value of React Native for its model transform.
+  CALayer *release(const Tracks::iterator trackIt)
+  {
+    CALayer *layer = trackIt->second;
+    const bool hasTransformTarget = trackIt->first.target == AnimationTarget::Transform;
+    tracks_.erase(trackIt);
+    if (hasTransformTarget) {
+      layer.allowsEdgeAntialiasing = hasEdgeAntialiasingInReactNative(layer.transform);
+    }
+    return layer;
+  }
+
   REAUIView<RCTComponentViewProtocol> *mountedView(const Tag tag) const
   {
     return [surfacePresenter_.mountingManager.componentViewRegistry findComponentViewWithTag:tag];
@@ -677,8 +725,7 @@ class CoreAnimationPlatform final : public NativeAnimationPlatform,
       return;
     }
     if (!(finished && holdsEndValue)) {
-      CALayer *layer = trackIt->second;
-      tracks_.erase(trackIt);
+      CALayer *layer = release(trackIt);
       if (holdsEndValue) {
         // Core Animation stops an animation that holds its end value but keeps it on the layer.
         [layer removeAnimationForKey:animationKeyForTrack(track)];
@@ -689,7 +736,7 @@ class CoreAnimationPlatform final : public NativeAnimationPlatform,
 
   __weak RCTSurfacePresenter *surfacePresenter_;
   TrackEndListener trackEndListener_;
-  std::unordered_map<TrackKey, __strong CALayer *, TrackKeyHash> tracks_;
+  Tracks tracks_;
 };
 
 std::optional<AnimationResultReason> CoreAnimationMountedAnimation::prepare(
@@ -728,7 +775,8 @@ void CoreAnimationMountedAnimation::start(const std::vector<TrackKey> &replacedT
         {request_.handle, track.target},
         layer_,
         makeAnimation(track, startValues_[index]),
-        track.endpointPolicy == EndpointPolicy::HoldWithoutCommit);
+        track.endpointPolicy == EndpointPolicy::HoldWithoutCommit,
+        rotatesAboutZ(track));
   }
   [CATransaction commit];
 }
